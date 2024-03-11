@@ -386,6 +386,88 @@ class Client:
                     raise parse_error(resp.status_code, json_payload)
                 yield response
 
+    def generate_stream_response(
+        self,
+        prompt: str,
+        do_sample: bool = False,
+        max_new_tokens: int = 20,
+        repetition_penalty: Optional[float] = None,
+        return_full_text: bool = False,
+        seed: Optional[int] = None,
+        stop_sequences: Optional[List[str]] = None,
+        temperature: Optional[float] = None,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        truncate: Optional[int] = None,
+        typical_p: Optional[float] = None,
+        watermark: bool = False,
+        top_n_tokens: Optional[int] = None,
+        grammar: Optional[Grammar] = None,
+    ) -> requests.Response:
+        """
+        Same as generate_stream, except it immediately returns the HTTP response instead
+        of returning a generator that makes the request and processes it.
+
+        Returns:
+            Iterator[StreamResponse]: stream of generated tokens
+        """
+        # Validate parameters
+        parameters = Parameters(
+            best_of=None,
+            details=True,
+            decoder_input_details=False,
+            do_sample=do_sample,
+            max_new_tokens=max_new_tokens,
+            repetition_penalty=repetition_penalty,
+            return_full_text=return_full_text,
+            seed=seed,
+            stop=stop_sequences if stop_sequences is not None else [],
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            truncate=truncate,
+            typical_p=typical_p,
+            watermark=watermark,
+            top_n_tokens=top_n_tokens,
+            grammar=grammar,
+        )
+        request = Request(inputs=prompt, stream=True, parameters=parameters)
+
+        resp = requests.post(
+            self.base_url,
+            json=request.dict(),
+            headers=self.headers,
+            cookies=self.cookies,
+            timeout=self.timeout,
+            stream=True,
+        )
+
+        if resp.status_code != 200:
+            raise parse_error(resp.status_code, resp.json())
+
+        return resp
+
+    def generate_stream_generator(self, resp: requests.Response) -> Iterator[StreamResponse]:
+        # Parse ServerSentEvents
+        for byte_payload in resp.iter_lines():
+            # Skip line
+            if byte_payload == b"\n":
+                continue
+
+            payload = byte_payload.decode("utf-8")
+
+            # Event data
+            if payload.startswith("data:"):
+                # Decode payload
+                json_payload = json.loads(payload.lstrip("data:").rstrip("/n"))
+                # Parse payload
+                try:
+                    response = StreamResponse(**json_payload)
+                except ValidationError:
+                    # If we failed to parse the payload, then it is an error payload
+                    raise parse_error(resp.status_code, json_payload)
+                yield response
+
 
 class AsyncClient:
     """Asynchronous Client to make calls to a text-generation-inference instance
