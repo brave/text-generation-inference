@@ -3,7 +3,7 @@ import requests
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
 from pydantic import ValidationError
-from typing import Dict, Optional, List, AsyncIterator, Iterator, Union
+from typing import Dict, Optional, List, AsyncIterator, Iterator, Union, Tuple
 
 from text_generation.types import (
     StreamResponse,
@@ -845,7 +845,7 @@ class AsyncClient:
         watermark: bool = False,
         top_n_tokens: Optional[int] = None,
         grammar: Optional[Grammar] = None,
-    ) -> ClientResponse:
+    ) -> Tuple[ClientSession, ClientResponse]:
         """
         Same as generate_stream, except it immediately returns the HTTP response instead
         of returning a generator that makes the request and processes it.
@@ -872,34 +872,34 @@ class AsyncClient:
         )
         request = Request(inputs=prompt, stream=True, parameters=parameters)
 
-        async with ClientSession(
+        # Make the POST request without a context manager
+        session = ClientSession(
             headers=self.headers, cookies=self.cookies, timeout=self.timeout
-        ) as session:
-            async with session.post(self.base_url, json=request.dict()) as resp:
-                if resp.status != 200:
-                    raise parse_error(resp.status, await resp.json())
-
-                return resp
+        )
+        resp = await session.post(self.base_url, json=request.dict())
+        if resp.status != 200:
+            await resp.release()
+            await session.close()
+            raise parse_error(resp.status, await resp.json())
+        return session, resp
 
     async def generate_stream_generator(
-        self, resp: ClientResponse
+        self, session: ClientSession, resp: ClientResponse
     ) -> AsyncIterator[StreamResponse]:
-        # Parse ServerSentEvents
-        async for byte_payload in resp.content:
-            # Skip line
-            if byte_payload == b"\n":
-                continue
+        try:
+            async for byte_payload in resp.content:
+                if byte_payload == b"\n":
+                    continue
 
-            payload = byte_payload.decode("utf-8")
+                payload = byte_payload.decode("utf-8")
 
-            # Event data
-            if payload.startswith("data:"):
-                # Decode payload
-                json_payload = json.loads(payload.lstrip("data:").rstrip("/n"))
-                # Parse payload
-                try:
-                    response = StreamResponse(**json_payload)
-                except ValidationError:
-                    # If we failed to parse the payload, then it is an error payload
-                    raise parse_error(resp.status, json_payload)
-                yield response
+                if payload.startswith("data:"):
+                    json_payload = json.loads(payload.lstrip("data:").rstrip("\n"))
+                    try:
+                        response = StreamResponse(**json_payload)
+                        yield response
+                    except ValidationError:
+                        raise parse_error(resp.status, json_payload)
+        finally:
+            await resp.release()
+            await session.close()
